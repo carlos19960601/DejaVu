@@ -1,0 +1,39 @@
+[package]
+name = "DejaVu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# TUI Framework
+ratatui = "0.30"
+crossterm = "0.28"
+
+# File System Operations
+walkdir = "2.5"
+
+# Hashing
+sha2 = "0.10"
+
+# Image Processing
+image = "0.25"
+# img_hash = "3.2"  # Disabled due to version conflict with image crate
+
+# System Integration
+open = "5.0"
+
+# Async Runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Progress Indication
+indicatif = "0.17"
+
+# CLI Parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Utils
+hex = "0.4"
+tempfile = "3.14"
