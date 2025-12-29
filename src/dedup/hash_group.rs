@@ -7,7 +7,10 @@ use crate::models::file_info::FileInfo;
 use crate::models::DuplicateGroup;
 use crate::hashing::{ExactHasher, PerceptualHasher};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use indicatif::ProgressBar;
+use rayon::prelude::*;
 
 /// Groups duplicate files using hash-based algorithms
 ///
@@ -28,10 +31,11 @@ impl HashGrouper {
         Self { similarity_threshold }
     }
 
-    /// Group files by exact SHA-256 hash
+    /// Group files by exact SHA-256 hash using multi-threading
     ///
-    /// This method computes SHA-256 hashes for all files and groups files
-    /// with identical hashes together. Only groups with 2 or more files are returned.
+    /// This method computes SHA-256 hashes for all files in parallel using rayon,
+    /// then groups files with identical hashes together. Only groups with 2 or more
+    /// files are returned.
     ///
     /// # Arguments
     /// * `files` - Vector of files to group
@@ -39,18 +43,46 @@ impl HashGrouper {
     ///
     /// # Returns
     /// Vector of DuplicateGroup containing only groups with duplicates
+    ///
+    /// # Performance
+    /// Uses multiple CPU cores to compute hashes in parallel, significantly
+    /// reducing processing time for large file collections.
     pub fn group_by_exact_hash(&self, files: Vec<FileInfo>, progress: Option<&ProgressBar>) -> Result<Vec<DuplicateGroup>> {
-        let mut hash_map: HashMap<Vec<u8>, Vec<FileInfo>> = HashMap::new();
+        use std::sync::Mutex;
 
-        for (index, file) in files.into_iter().enumerate() {
-            if let Some(pb) = progress {
-                pb.set_message(format!("Hashing: {}", file.filename()));
-                pb.set_position(index as u64);
+        let hash_map: HashMap<Vec<u8>, Vec<FileInfo>> = HashMap::new();
+        let hash_map = Arc::new(Mutex::new(hash_map));
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // Process files in parallel
+        files.par_iter().for_each(|file| {
+            // Compute hash for this file
+            if let Ok(hash) = ExactHasher::compute_hash(&file.path) {
+                // Insert into hash map
+                if let Ok(mut map) = hash_map.lock() {
+                    map.entry(hash).or_default().push(file.clone());
+                }
             }
 
-            let hash = ExactHasher::compute_hash(&file.path)?;
-            hash_map.entry(hash).or_default().push(file);
-        }
+            // Update progress
+            let count = counter.fetch_add(1, Ordering::Relaxed);
+            if let Some(pb) = progress {
+                pb.set_message(format!("Hashing: {} ({} / {})",
+                    file.filename(),
+                    count + 1,
+                    files.len()
+                ));
+                pb.set_position(count as u64 + 1);
+            }
+        });
+
+        // Extract the collected results
+        let hash_map = Arc::try_unwrap(hash_map)
+            .expect("Arc should have only one reference left")
+            .into_inner()
+            .map_err(|e| crate::error::DejaVuError::FileOperationFailed(
+                format!("Mutex poisoned: {}", e)
+            ))?;
 
         // Filter to only groups with duplicates
         let groups: Vec<DuplicateGroup> = hash_map
@@ -141,7 +173,8 @@ impl HashGrouper {
     /// Two-stage duplicate detection: exact hash + perceptual hash
     ///
     /// This is the main entry point for duplicate detection. Currently,
-    /// it only performs exact duplicate detection using SHA-256 hashes.
+    /// it only performs exact duplicate detection using SHA-256 hashes
+    /// with multi-threading for improved performance.
     /// Perceptual hashing for similar images can be added as a second stage.
     ///
     /// # Arguments
@@ -150,8 +183,12 @@ impl HashGrouper {
     ///
     /// # Returns
     /// Vector of DuplicateGroup containing all duplicate groups found
+    ///
+    /// # Performance
+    /// Uses rayon for parallel hash computation, automatically utilizing
+    /// all available CPU cores for significant speedup on multi-core systems.
     pub fn find_duplicates(&self, files: Vec<FileInfo>, progress: Option<&ProgressBar>) -> Result<Vec<DuplicateGroup>> {
-        // Stage 1: Group by exact hash
+        // Stage 1: Group by exact hash (multi-threaded)
         let exact_groups = self.group_by_exact_hash(files, progress)?;
 
         // Stage 2: Find similar images within each group and across groups
